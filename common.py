@@ -32,7 +32,7 @@ class NetTools(object):
     def conv2d(x, kernel_shape, variable_scope, stride=1, val_range=None, padding="SAME",
                with_param=False, weight_decay=None, collect="losses"):
         if val_range is None:
-            min_val = -1.0 / (np.prod(kernel_shape[:-1]))
+            min_val = -1.0 / float(np.sqrt(np.prod(kernel_shape[:-1])))
             val_range = (min_val, -min_val)
         with tf.variable_scope(variable_scope) as scope:
             kernel = NetTools.variable_with_weight_decay('weights', shape=kernel_shape,
@@ -63,7 +63,7 @@ class NetTools(object):
     def full_connect(x, W_shape, variable_scope, val_range=None, activate="relu",
                      weight_decay=None, collect="losses", with_param=False, with_bias=True):
         if val_range is None:
-            min_val = -1.0 / (np.prod(W_shape[:-1]))
+            min_val = -1.0 / float(np.sqrt(np.prod(W_shape[:-1])))
             val_range = (min_val, -min_val)
         with tf.variable_scope(variable_scope) as scope:
             weights = NetTools.variable_with_weight_decay('weights', shape=W_shape,

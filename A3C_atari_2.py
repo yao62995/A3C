@@ -25,8 +25,8 @@ tf.app.flags.DEFINE_integer("frame_skip", 1, "number of frame skip")
 tf.app.flags.DEFINE_integer("frame_seq", 4, "number of frame sequence")
 
 tf.app.flags.DEFINE_string("opt", "rms", "choice in [rms, adam, sgd]")
-tf.app.flags.DEFINE_float("learn_rate", 7e-4, "param of smooth")
-tf.app.flags.DEFINE_integer("grad_clip", 40.0, "gradient clipping cut-off")
+tf.app.flags.DEFINE_float("learn_rate", 5e-4, "param of smooth")
+tf.app.flags.DEFINE_integer("grad_clip", 40, "gradient clipping cut-off")
 tf.app.flags.DEFINE_float("eps", 1e-8, "param of smooth")
 tf.app.flags.DEFINE_float("entropy_beta", 1e-2, "param of policy entropy weight")
 tf.app.flags.DEFINE_float("gamma", 0.95, "discounted ratio")
@@ -84,29 +84,31 @@ class A3CNet(object):
         with tf.device("/gpu:%d" % flags.gpu):
             # placeholder
             with tf.variable_scope("%s_holder" % scope):
-                self.state = tf.placeholder(tf.float32, shape=[None] + list(state_shape), name="state")  # (None, 84, 84, 4)
+                self.state = tf.placeholder(tf.float32, shape=[None] + list(state_shape),
+                                            name="state")  # (None, 84, 84, 4)
                 self.action = tf.placeholder(tf.float32, shape=[None, action_dim], name="action")  # (None, actions)
                 self.target_q = tf.placeholder(tf.float32, shape=[None])
             # shared parts
             with tf.variable_scope("%s_shared" % scope):
                 conv1, self.w1, self.b1 = conv2d(self.state, (8, 8, state_shape[-1], 16), "conv_1", stride=4,
-                                                 padding="VALID", with_param=True, weight_decay=0.01, collect=scope)  # (None, 20, 20, 16)
+                                                 padding="VALID", with_param=True)  # (None, 20, 20, 16)
                 # conv1 = NetTools.batch_normalized(conv1)
                 conv2, self.w2, self.b2 = conv2d(conv1, (4, 4, 16, 32), "conv_2", stride=2,
-                                                 padding="VALID", with_param=True, weight_decay=0.01, collect=scope)  # (None, 9, 9, 32)
+                                                 padding="VALID", with_param=True)  # (None, 9, 9, 32)
                 # conv2 = NetTools.batch_normalized(conv2)
                 flat1 = tf.reshape(conv2, (-1, 9 * 9 * 32), name="flat1")
-                fc_1, self.w3, self.b3 = full_connect(flat1, (9 * 9 * 32, 256), "fc1", with_param=True, weight_decay=0.01, collect=scope)
+                fc_1, self.w3, self.b3 = full_connect(flat1, (9 * 9 * 32, 256), "fc1", with_param=True)
                 # fc_1 = NetTools.batch_normalized(fc_1)
+                shared_out = fc_1
             # policy parts
             with tf.variable_scope("%s_policy" % scope):
-                pi_fc_1, self.pi_w1, self.pi_b1 = full_connect(fc_1, (256, 256), "pi_fc1", with_param=True, weight_decay=0.01, collect=scope)
+                pi_fc_1, self.pi_w1, self.pi_b1 = full_connect(shared_out, (256, 256), "pi_fc1", with_param=True)
                 pi_fc_2, self.pi_w2, self.pi_b2 = full_connect(pi_fc_1, (256, action_dim), "pi_fc2", activate=None,
                                                                with_param=True)
                 self.policy_out = tf.nn.softmax(pi_fc_2, name="pi_out")
             # value parts
             with tf.variable_scope("%s_value" % scope):
-                v_fc_1, self.v_w1, self.v_b1 = full_connect(fc_1, (256, 256), "v_fc1", with_param=True, weight_decay=0.01, collect=scope)
+                v_fc_1, self.v_w1, self.v_b1 = full_connect(shared_out, (256, 256), "v_fc1", with_param=True)
                 v_fc_2, self.v_w2, self.v_b2 = full_connect(v_fc_1, (256, 1), "v_fc2", activate=None, with_param=True)
                 self.value_out = tf.reshape(v_fc_2, [-1], name="v_out")
             # loss values
@@ -114,10 +116,17 @@ class A3CNet(object):
                 self.entropy = - tf.reduce_sum(self.policy_out * tf.log(self.policy_out + flags.eps))
                 time_diff = self.target_q - self.value_out
                 policy_prob = tf.log(tf.reduce_sum(tf.mul(self.policy_out, self.action), reduction_indices=1))
-                self.policy_loss = - tf.reduce_sum(policy_prob * time_diff)
+                self.policy_loss = - tf.reduce_sum(policy_prob * tf.abs(time_diff)) + self.entropy * flags.entropy_beta
                 self.value_loss = tf.reduce_sum(tf.square(time_diff))
-                self.l2_loss = tf.add_n(tf.get_collection(scope))
-                self.total_loss = self.policy_loss + self.value_loss * 0.5 + self.entropy * flags.entropy_beta
+                self.policy_grads = tf.gradients(self.policy_loss, [self.pi_w1, self.pi_b1, self.pi_w2, self.pi_b2])
+                self.value_grads = tf.gradients(self.value_loss, [self.v_w1, self.v_b1, self.v_w2, self.v_b2])
+                self.shared_loss = self.policy_loss + self.value_loss * 0.5
+                self.shared_grads = tf.gradients(self.shared_loss, [self.w1, self.b1, self.w2, self.b2, self.w3, self.b3])
+                # self.shared_out_grad = tf.gradients(self.policy_loss, [shared_out])[0] + \
+                #                        tf.gradients(self.value_loss, [shared_out])[0] * 0.5
+                # self.shared_grads = tf.gradients(shared_out,
+                #                                  [self.w1, self.b1, self.w2, self.b2, self.w3, self.b3],
+                #                                  grad_ys=self.shared_out_grad)
 
     def get_policy(self, sess, state):
         return sess.run(self.policy_out, feed_dict={self.state: [state]})[0]
@@ -235,7 +244,7 @@ class A3CLSTMNet(object):
                 self.entropy = - tf.reduce_mean(self.policy_out * tf.log(self.policy_out + flags.eps))
                 time_diff = self.target_q - self.value_out
                 policy_prob = tf.log(tf.reduce_sum(tf.mul(self.policy_out, self.action), reduction_indices=1))
-                self.policy_loss = - tf.reduce_sum(policy_prob * time_diff, reduction_indices=1)
+                self.policy_loss = - tf.reduce_sum(policy_prob * tf.abs(time_diff), reduction_indices=1)
                 self.value_loss = tf.square(time_diff)
                 self.total_loss = self.policy_loss + self.value_loss * 0.5 + self.entropy * flags.entropy_beta
         # lstm state
@@ -286,7 +295,7 @@ class A3CSingleThread(threading.Thread):
         summaries.append(tf.scalar_summary("entropy/%d" % self.thread_id, self.local_net.entropy))
         summaries.append(tf.scalar_summary("policy_loss/%d" % self.thread_id, self.local_net.policy_loss))
         summaries.append(tf.scalar_summary("value_loss/%d" % self.thread_id, self.local_net.value_loss))
-        summaries.append(tf.scalar_summary("total_loss/%d" % self.thread_id, self.local_net.total_loss))
+        summaries.append(tf.scalar_summary("shared_loss/%d" % self.thread_id, self.local_net.shared_loss))
         # apply accumulated gradients
         with tf.device("/gpu:%d" % flags.gpu):
             clip_accum_grads = [tf.clip_by_value(grad, -flags.grad_clip, flags.grad_clip) for grad in self.accum_grads]
@@ -318,12 +327,8 @@ class A3CSingleThread(threading.Thread):
         net = self.local_net
         accum_grad_ops = []
         with tf.device("/gpu:%d" % flags.gpu):
-            with tf.op_scope([net], name="grad_ops_%d" % self.thread_id):
-                var_refs = [v.ref() for v in net.get_vars()]
-                grads = tf.gradients(net.total_loss, var_refs, gate_gradients=False,
-                                     aggregation_method=None,
-                                     colocate_gradients_with_ops=False)
             with tf.op_scope([], name="accum_ops_%d" % self.thread_id):
+                grads = net.shared_grads + net.policy_grads + net.value_grads
                 for (grad, var, accum_grad) in zip(grads, net.get_vars(), self.accum_grads):
                     name = var.name.replace(":", "_") + "_accum_grad_ops"
                     accum_ops = tf.assign_add(accum_grad, grad, name=name)
@@ -407,7 +412,6 @@ class A3CSingleThread(threading.Thread):
             if loop % 10 == 0:
                 global_step, summary_str = res[1:3]
                 self.master.summary_writer.add_summary(summary_str, global_step=global_step)
-                # logger.info("game=%s, global_step=%d, total_loss=%.2f" % (flags.game, global_step, total_loss))
                 self.master.global_step_val = int(global_step)
             # async update grads to global network
             sess.run(self.apply_gradients)
@@ -415,7 +419,7 @@ class A3CSingleThread(threading.Thread):
             # evaluate
             if loop % 10 == 0 and self.thread_id == 1:
                 self.test_phase()
-            if loop % 1000 and self.thread_id == 1:
+            if loop % 1000 == 0 and self.thread_id == 1:
                 save_model(self.master.sess, flags.train_dir, self.master.saver, "a3c_model",
                            global_step=self.master.global_step_val)
 
@@ -472,7 +476,8 @@ class A3CAtari(object):
         with tf.device("/gpu:%d" % flags.gpu):
             # optimizer
             if flags.opt == "rms":
-                optimizer = tf.train.RMSPropOptimizer(flags.learn_rate, decay=0.99, epsilon=0.1, name="global_optimizer")
+                optimizer = tf.train.RMSPropOptimizer(flags.learn_rate, decay=0.99, epsilon=0.1,
+                                                      name="global_optimizer")
             elif flags.opt == "adam":
                 optimizer = tf.train.AdamOptimizer(flags.learn_rate, name="global_optimizer")
             else:
@@ -506,8 +511,6 @@ class A3CAtari(object):
         print "done!"
 
 
-
-
 def signal_handler():
     sys.exit(0)
 
@@ -523,6 +526,7 @@ def main(_):
     # model
     model = A3CAtari()
     model.train()
+
 
 if __name__ == "__main__":
     tf.app.run()
