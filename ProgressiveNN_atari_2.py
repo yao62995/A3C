@@ -95,7 +95,7 @@ class A3CNet(object):
                 # lateral connect
                 col_1, col_2 = col_1_layers, col_2_layers
                 col_2[3], lateral_vars = self.lateral_connect("lateral_l1", range(2), [col_1[2], col_2[2]], col_2[3])
-                self.shared_vars = col_1_vars + col_2_vars + lateral_vars
+                self.shared_vars = col_1_vars[:4] + col_2_vars + lateral_vars
                 shared_out = col_2[3]
                 # policy parts
                 with tf.variable_scope("col_%d_policy" % column_id):
