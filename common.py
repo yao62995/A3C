@@ -1,16 +1,16 @@
 #!/usr/bin/python
 #  -*- coding: utf-8 -*-
-# author: yao62995@gmail.com
+# author: yao62995 <yao_62995@163.com>
 
 import os
 import time
 import sys
 import abc
 import random
-import numpy as np
-import tensorflow as tf
 
-from tensorflow.python.ops import rnn_cell
+import numpy as np
+
+import tensorflow as tf
 
 
 class NetTools(object):
@@ -56,6 +56,11 @@ class NetTools(object):
 
     @staticmethod
     def batch_normalized(x, mean=0.0, var=1.0, offset=None, scale=None, epsilon=1e-10, name=None):
+        """
+            error implement, please ref: tensorflow-Inception codes in
+             "https://github.com/tensorflow/models/blob/master/inception/inception/slim/ops.py"
+        """
+        # TODO: solve bug here
         return tf.nn.batch_normalization(x, mean=mean, variance=var, offset=offset, scale=scale,
                                          variance_epsilon=epsilon, name=name)
 

@@ -1,15 +1,16 @@
 #!/usr/bin/python
 #  -*- coding: utf-8 -*-
-# author: yao62995@gmail.com
+# author: yao62995 <yao_62995@163.com>
 
-import cv2
 import re
-import gym
 import signal
 import threading
-import scipy.signal
-from tensorflow.python.ops.rnn_cell import BasicLSTMCell
 
+import gym
+import scipy.signal
+
+import cv2
+from tensorflow.RNNs.rnn_cell import BasicLSTMCell
 from common import *
 
 tf.app.flags.DEFINE_string("game", "Breakout-v0", "gym environment name")
@@ -236,7 +237,7 @@ class A3CLSTMNet(object):
                                                  padding="VALID", with_param=True)  # (None, 20, 20, 16)
                 conv2, self.w2, self.b2 = conv2d(conv1, (4, 4, 16, 32), "conv_2", stride=2,
                                                  padding="VALID", with_param=True)  # (None, 9, 9, 32)
-                flat1 = tf.reshape(conv2, (9 * 9 * 32, 256), name="flat1")
+                flat1 = tf.reshape(conv2, (-1, 9 * 9 * 32), name="flat1")
                 fc_1, self.w3, self.b3 = full_connect(flat1, (9 * 9 * 32, 256), "fc1", with_param=True)
             # rnn parts
             with tf.variable_scope("%s_rnn" % scope) as scope:
@@ -266,8 +267,8 @@ class A3CLSTMNet(object):
                 self.entropy = - tf.reduce_mean(self.policy_out * tf.log(self.policy_out + flags.eps))
                 time_diff = self.target_q - self.value_out
                 policy_prob = tf.log(tf.reduce_sum(tf.mul(self.policy_out, self.action), reduction_indices=1))
-                self.policy_loss = - tf.reduce_sum(policy_prob * time_diff, reduction_indices=1)
-                self.value_loss = tf.square(time_diff)
+                self.policy_loss = - tf.reduce_sum(policy_prob * time_diff)
+                self.value_loss = tf.reduce_sum(tf.square(time_diff))
                 self.total_loss = self.policy_loss + self.value_loss * 0.5 + self.entropy * flags.entropy_beta
         # lstm state
         self.lstm_state_out = np.zeros((1, self.lstm.state_size), dtype=np.float32)
@@ -278,13 +279,13 @@ class A3CLSTMNet(object):
     def get_policy(self, sess, state):
         policy_out, self.lstm_state_out = sess.run([self.policy_out, self.lstm_state],
                                                    feed_dict={self.state: [state],
-                                                              self.initial_lstm_state: self.lstm_state,
+                                                              self.initial_lstm_state: self.lstm_state_out,
                                                               self.sequence_length: [1]})
         return policy_out[0]
 
     def get_value(self, sess, state):
         value_out, _ = sess.run([self.value_out, self.lstm_state], feed_dict={self.state: [state],
-                                                                              self.initial_lstm_state: self.lstm_state,
+                                                                              self.initial_lstm_state: self.lstm_state_out,
                                                                               self.sequence_length: [1]})[0]
         return value_out[0]
 
@@ -387,7 +388,10 @@ class A3CSingleThread(threading.Thread):
         rollout_path = {"state": [], "action": [], "rewards": [], "done": []}
         while not terminal and (train_step - t_start <= flags.t_max):
             pi_probs = self.local_net.get_policy(self.master.sess, self.env.state)
-            action = self.weighted_choose_action(pi_probs)
+            if random.random() < 0.8:
+                action = self.weighted_choose_action(pi_probs)
+            else:
+                action = random.randint(0, self.env.action_dim - 1)
             _, reward, terminal = self.env.forward_action(action)
             train_step += 1
             rollout_path["state"].append(self.env.state)
@@ -428,9 +432,16 @@ class A3CSingleThread(threading.Thread):
             fetches = [self.do_accum_grads_ops, self.master.global_step]
             if loop % 10 == 0:
                 fetches.append(self.summary_op)
-            res = sess.run(fetches, feed_dict={lc_net.state: rollout_path["state"],
-                                               lc_net.action: rollout_path["action"],
-                                               lc_net.target_q: rollout_path["returns"]})
+            if flags.use_lstm:
+                res = sess.run(fetches, feed_dict={lc_net.state: rollout_path["state"],
+                                                   lc_net.action: rollout_path["action"],
+                                                   lc_net.target_q: rollout_path["returns"],
+                                                   lc_net.initial_lstm_state: lc_net.lstm_state_out,
+                                                   lc_net.sequence_length: [1]})
+            else:
+                res = sess.run(fetches, feed_dict={lc_net.state: rollout_path["state"],
+                                                   lc_net.action: rollout_path["action"],
+                                                   lc_net.target_q: rollout_path["returns"]})
             if loop % 10 == 0:
                 global_step, summary_str = res[1], res[2]
                 self.master.summary_writer.add_summary(summary_str, global_step=global_step)

@@ -1,31 +1,28 @@
 #!/usr/bin/python
 #  -*- coding: utf-8 -*-
-# author: yao62995@gmail.com
+# author: yao62995 <yao_62995@163.com>
 
 import re
-import gym
 import signal
 import threading
-import scipy.signal
-from collections import deque
-from tensorflow.python.ops.rnn_cell import BasicLSTMCell
 
+import gym
+import scipy.signal
+
+from tensorflow.RNNs.rnn_cell import BasicLSTMCell
 from common import *
 
 tf.app.flags.DEFINE_string("game", "Breakout-v0", "gym environment name")
 tf.app.flags.DEFINE_string("train_dir", "./models/experiment0/", "gym environment name")
 tf.app.flags.DEFINE_integer("gpu", 0, "gpu id")
-tf.app.flags.DEFINE_bool("use_lstm", False, "use LSTM layer")
 
 tf.app.flags.DEFINE_integer("t_max", 32, "episode max time step")
 tf.app.flags.DEFINE_integer("t_train", 1e4, "train max time step")
 tf.app.flags.DEFINE_integer("t_test", 1e4, "test max time step")
 tf.app.flags.DEFINE_integer("jobs", 8, "parallel running thread number")
 
-tf.app.flags.DEFINE_integer("frame_skip", 1, "number of frame skip")
-tf.app.flags.DEFINE_integer("frame_seq", 3, "number of frame sequence")
-
 tf.app.flags.DEFINE_float("learn_rate", 5e-4, "param of smooth")
+tf.app.flags.DEFINE_integer("grad_clip", 40.0, "gradient clipping cut-off")
 tf.app.flags.DEFINE_float("eps", 1e-8, "param of smooth")
 tf.app.flags.DEFINE_float("entropy_beta", 1e-4, "param of policy entropy weight")
 tf.app.flags.DEFINE_float("gamma", 0.95, "discounted ratio")
@@ -77,9 +74,10 @@ class A3CNet(object):
     def __init__(self, state_dim, action_dim, scope):
         with tf.device("/gpu:%d" % flags.gpu):
             # placeholder
-            self.state = tf.placeholder(tf.float32, shape=[None, state_dim], name="state")  # (None, 84, 84, 4)
-            self.action = tf.placeholder(tf.float32, shape=[None, action_dim], name="action")  # (None, actions)
-            self.target_q = tf.placeholder(tf.float32, shape=[None])
+            with tf.variable_scope("%s_holder" % scope):
+                self.state = tf.placeholder(tf.float32, shape=[None, state_dim], name="state")  # (None, 84, 84, 4)
+                self.action = tf.placeholder(tf.float32, shape=[None, action_dim], name="action")  # (None, actions)
+                self.target_q = tf.placeholder(tf.float32, shape=[None])
             # policy parts
             with tf.variable_scope("%s_policy" % scope):
                 pi_fc_1, self.pi_w1, self.pi_b1 = full_connect(self.state, (512, 256), "pi_fc1", with_param=True)
@@ -112,148 +110,6 @@ class A3CNet(object):
                 self.v_w1, self.v_b1, self.v_w2, self.v_b2, self.v_w3, self.v_b3]
 
 
-class A3CLSTMNet(object):
-    def __init__(self, state_shape, action_dim, scope):
-
-        class InnerLSTMCell(BasicLSTMCell):
-            def __init__(self, num_units, forget_bias=1.0, input_size=None):
-                BasicLSTMCell.__init__(self, num_units, forget_bias=forget_bias, input_size=input_size)
-                self.matrix, self.bias = None, None
-
-            def __call__(self, inputs, state, scope=None):
-                """
-                    Long short-term memory cell (LSTM).
-                    implement from BasicLSTMCell.__call__
-                """
-                with tf.variable_scope(scope or type(self).__name__):  # "BasicLSTMCell"
-                    # Parameters of gates are concatenated into one multiply for efficiency.
-                    c, h = tf.split(1, 2, state)
-                    concat = self.linear([inputs, h], 4 * self._num_units, True)
-
-                    # i = input_gate, j = new_input, f = forget_gate, o = output_gate
-                    i, j, f, o = tf.split(1, 4, concat)
-
-                    new_c = c * tf.sigmoid(f + self._forget_bias) + tf.sigmoid(i) * tf.tanh(j)
-                    new_h = tf.tanh(new_c) * tf.sigmoid(o)
-
-                    return new_h, tf.concat(1, [new_c, new_h])
-
-            def linear(self, args, output_size, bias, bias_start=0.0, scope=None):
-                """
-                    Linear map: sum_i(args[i] * W[i]), where W[i] is a variable.
-                    implement from function of tensorflow.python.ops.rnn_cell.linear()
-                """
-                if args is None or (isinstance(args, (list, tuple)) and not args):
-                    raise ValueError("`args` must be specified")
-                if not isinstance(args, (list, tuple)):
-                    args = [args]
-
-                    # Calculate the total size of arguments on dimension 1.
-                total_arg_size = 0
-                shapes = [a.get_shape().as_list() for a in args]
-                for shape in shapes:
-                    if len(shape) != 2:
-                        raise ValueError("Linear is expecting 2D arguments: %s" % str(shapes))
-                    if not shape[1]:
-                        raise ValueError("Linear expects shape[1] of arguments: %s" % str(shapes))
-                    else:
-                        total_arg_size += shape[1]
-
-                # Now the computation.
-                with tf.variable_scope(scope or "Linear"):
-                    matrix = tf.get_variable("Matrix", [total_arg_size, output_size])
-                    if len(args) == 1:
-                        res = tf.matmul(args[0], matrix)
-                    else:
-                        res = tf.matmul(tf.concat(1, args), matrix)
-                    if not bias:
-                        return res
-                    bias_term = tf.get_variable(
-                        "Bias", [output_size],
-                        initializer=tf.constant_initializer(bias_start))
-                    self.matrix = matrix
-                    self.bias = bias_term
-                return res + bias_term
-
-        with tf.device("/gpu:%d" % flags.gpu):
-            # placeholder
-            self.state = tf.placeholder(tf.float32, shape=[None] + list(state_shape), name="state")  # (None, 84, 84, 4)
-            self.action = tf.placeholder(tf.float32, shape=[None, action_dim], name="action")  # (None, actions)
-            self.target_q = tf.placeholder(tf.float32, shape=[None])
-            # policy parts
-            with tf.variable_scope("%s_policy" % scope):
-                pi_fc_1, self.pi_w1, self.pi_b1 = full_connect(self.state, (512, 256), "pi_fc1", with_param=True)
-                pi_fc_2, self.pi_w2, self.pi_b2 = full_connect(pi_fc_1, (256, 256), "pi_fc2", with_param=True)
-            # policy rnn parts
-            with tf.variable_scope("%s_policy_rnn" % scope) as scope:
-                h_flat1 = tf.reshape(pi_fc_2, (1, -1, 256))
-                self.pi_lstm = InnerLSTMCell(256)
-                self.pi_initial_lstm_state = tf.placeholder(tf.float32, shape=[1, self.pi_lstm.state_size])
-                self.pi_sequence_length = tf.placeholder(tf.float32, [1])
-                lstm_outputs, self.pi_lstm_state = tf.nn.dynamic_rnn(self.pi_lstm, h_flat1,
-                                                                     initial_state=self.pi_initial_lstm_state,
-                                                                     sequence_length=self.pi_sequence_length,
-                                                                     time_major=False,
-                                                                     scope=scope)
-                lstm_outputs = tf.reshape(lstm_outputs, [-1, 256])
-                pi_fc_3, self.pi_w3, self.pi_b3 = full_connect(lstm_outputs, (256, action_dim), "pi_fc3", activate=None,
-                                                               with_param=True)
-                self.policy_out = NetTools.batch_normalized(pi_fc_3, name="pi_out")
-
-            # value parts
-            with tf.variable_scope("%s_value" % scope):
-                v_fc_1, self.v_w1, self.v_b1 = full_connect(self.state, (512, 256), "v_fc1", with_param=True)
-                v_fc_2, self.v_w2, self.v_b2 = full_connect(v_fc_1, (256, 256), "v_fc2", with_param=True)
-            # value rnn parts
-            with tf.variable_scope("%s_value_rnn" % scope) as scope:
-                h_flat2 = tf.reshape(v_fc_2, (1, -1, 256))
-                self.v_lstm = InnerLSTMCell(256)
-                self.v_initial_lstm_state = tf.placeholder(tf.float32, shape=[1, self.v_lstm.state_size])
-                self.v_sequence_length = tf.placeholder(tf.float32, [1])
-                lstm_outputs, self.v_lstm_state = tf.nn.dynamic_rnn(self.v_lstm, h_flat2,
-                                                                    initial_state=self.v_initial_lstm_state,
-                                                                    sequence_length=self.v_sequence_length,
-                                                                    time_major=False,
-                                                                    scope=scope)
-                lstm_outputs = tf.reshape(lstm_outputs, [-1, 256])
-                v_fc_3, self.v_w3, self.v_b3 = full_connect(lstm_outputs, (256, 1), "v_fc3", activate=None,
-                                                            with_param=True)
-                self.value_out = tf.reshape(v_fc_3, [-1], name="v_out")
-            # loss values
-            with tf.op_scope([self.policy_out, self.value_out], "%s_loss" % scope):
-                self.entropy = - tf.reduce_mean(self.policy_out * tf.log(self.policy_out + flags.eps))
-                time_diff = self.target_q - self.value_out
-                # policy_prob = tf.reduce_sum(tf.log(tf.mul(self.policy_out, self.action)), reduction_indices=1)
-                # self.policy_loss = - tf.reduce_sum(policy_prob * time_diff, reduction_indices=1)
-                self.value_loss = tf.square(time_diff)
-                self.total_loss = self.value_loss + self.entropy * flags.entropy_beta
-        # lstm state
-        self.pi_lstm_state_out = np.zeros((1, self.pi_lstm.state_size), dtype=np.float32)
-        self.v_lstm_state_out = np.zeros((1, self.v_lstm.state_size), dtype=np.float32)
-
-    def reset_lstm_state(self):
-        self.pi_lstm_state_out = np.zeros((1, self.pi_lstm.state_size), dtype=np.float32)
-        self.v_lstm_state_out = np.zeros((1, self.v_lstm.state_size), dtype=np.float32)
-
-    def get_policy(self, sess, state):
-        policy_out, self.pi_lstm_state_out = sess.run([self.policy_out, self.pi_lstm_state],
-                                                      feed_dict={self.state: [state],
-                                                                 self.pi_initial_lstm_state: self.pi_lstm_state,
-                                                                 self.pi_sequence_length: [1]})
-        return policy_out[0]
-
-    def get_value(self, sess, state):
-        value_out, self.v_lstm_state_out = sess.run([self.value_out, self.v_lstm_state],
-                                                    feed_dict={self.state: [state],
-                                                               self.v_initial_lstm_state: self.v_lstm_state,
-                                                               self.v_sequence_length: [1]})[0]
-        return value_out[0]
-
-    def get_vars(self):
-        return [self.pi_w1, self.pi_b1, self.pi_w2, self.pi_b2,
-                self.pi_lstm.matrix, self.pi_lstm.bias, self.pi_w3, self.pi_b3,
-                self.v_w1, self.v_b1, self.v_w2, self.v_b2,
-                self.v_lstm.matrix, self.v_lstm.bias, self.v_w3, self.v_b3]
 
 
 class A3CSingleThread(object):
@@ -262,10 +118,7 @@ class A3CSingleThread(object):
         self.env = ControlEnv(gym.make(flags.game))
         self.master = master
         # local network
-        if flags.use_lstm:
-            self.local_net = A3CLSTMNet(self.env.state_shape, self.env.action_dim, scope="local_net_%d" % thread_id)
-        else:
-            self.local_net = A3CNet(self.env.state_shape, self.env.action_dim, scope="local_net_%d" % thread_id)
+        self.local_net = A3CNet(self.env.state_shape, self.env.action_dim, scope="local_net_%d" % thread_id)
         # sync network
         self.sync = self.sync_network(master.shared_net)
         # accumulate gradients
@@ -279,8 +132,9 @@ class A3CSingleThread(object):
         summaries.append(tf.scalar_summary("total_loss_%d" % self.thread_id, self.local_net.total_loss))
         # apply accumulated gradients
         with tf.device("/gpu:%d" % flags.gpu):
+            clip_accum_grads = [tf.clip_by_value(grad, -flags.grad_clip, flags.grad_clip) for grad in self.accum_grads]
             self.apply_gradients = master.shared_opt.apply_gradients(
-                zip(self.accum_grads, master.shared_net.get_vars()))
+                zip(clip_accum_grads, master.shared_net.get_vars()))
             self.summary_op = tf.merge_summary(summaries)
 
     def sync_network(self, source_net):
@@ -367,8 +221,6 @@ class A3CSingleThread(object):
             if rollout_path["done"][-1]:
                 rollout_path["rewards"][-1] = 0
                 self.env.reset_env()
-                if flags.use_lstm:
-                    self.local_net.reset_lstm_state()
             else:
                 rollout_path["rewards"][-1] = self.local_net.get_value(sess, rollout_path["state"][-1])
             rollout_path["returns"] = self.discount(rollout_path["rewards"])
@@ -410,10 +262,7 @@ class A3CAtari(object):
     def __init__(self):
         self.env = ControlEnv(gym.make(flags.game))
         # shared network
-        if flags.use_lstm:
-            self.shared_net = A3CLSTMNet(self.env.state_shape, self.env.action_dim, scope="global_net")
-        else:
-            self.shared_net = A3CNet(self.env.state_shape, self.env.action_dim, scope="global_net")
+        self.shared_net = A3CNet(self.env.state_shape, self.env.action_dim, scope="global_net")
         # shared optimizer
         self.shared_opt, self.global_step, self.summary_writer = self.shared_optimizer()
         # local training threads
